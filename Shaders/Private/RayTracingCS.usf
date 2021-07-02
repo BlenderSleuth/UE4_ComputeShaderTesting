@@ -1,0 +1,222 @@
+﻿// Copyright Ben Sutherland 2021. All rights reserved.
+
+// ReSharper disable once CppUnusedIncludeDirective
+#include "/Engine/Public/Platform.ush"
+
+RWTexture2D<float4> OutputTexture;
+Texture2D SkyboxTexture;
+SamplerState SkyboxTextureSampler;
+int2 Dimensions;
+float4x4 CameraToWorld;
+float4x4 CameraInverseProjection;
+float4 Colour;
+StructuredBuffer<float4> SphereBuffer;
+RWStructuredBuffer<float2> RandomBuffer;
+
+#ifndef PI
+#define PI 3.14159265359f
+#endif
+
+static const float INF = 1.#INF;
+
+struct FRay
+{
+	float3 Origin;
+	float3 Direction;
+	float3 Energy;
+};
+
+FRay CreateRay(const float3 Origin, const float3 Direction)
+{
+	FRay Ray;
+	Ray.Origin = Origin;
+	Ray.Direction = Direction;
+	Ray.Energy = float3(1.f, 1.f, 1.f);
+	return Ray;
+}
+
+FRay CreateCameraRay(const float2 UV)
+{
+	// Transform camera origin to world space
+	const float3 Origin = mul(float4(0.f, 0.f, 0.f, 1.f), CameraToWorld).xyz;
+	
+	// Transform UV from view-space to camera space
+	float3 Direction = mul(float4(UV, 0.f, 1.f), CameraInverseProjection).xyz;
+	// Transform from camera space to world space
+	Direction = mul(float4(Direction, 0.f), CameraToWorld).xyz;
+	Direction = normalize(Direction);
+
+	return CreateRay(Origin, Direction);
+}
+
+struct FRayHit
+{
+	float3 Position;
+	float Distance;
+	float3 Normal;
+};
+
+FRayHit CreateRayHit(const float3 Position, const float Distance, const float3 Normal)
+{
+	FRayHit RayHit;
+	RayHit.Position = Position;
+	RayHit.Distance = Distance;
+	RayHit.Normal = Normal;
+	return RayHit;
+}
+FRayHit CreateInitialRayHit()
+{
+	return CreateRayHit(0.f, INF, 0.f);
+}
+
+void IntersectGroundPlane(const FRay Ray, inout FRayHit BestHit)
+{
+	const float t = -Ray.Origin.z / Ray.Direction.z;
+	if (t > 0 && t < BestHit.Distance)
+	{
+		BestHit.Distance = t;
+		BestHit.Position = Ray.Origin + t * Ray.Direction;
+		BestHit.Normal = float3(0.f, 0.f, 1.f);
+	}
+}
+
+struct FSphere
+{
+	float3 Origin;
+	float Radius;
+};
+
+FSphere CreateSphere(const float3 Origin, const float Radius)
+{
+	FSphere Sphere;
+	Sphere.Origin = Origin;
+	Sphere.Radius = Radius;
+	return Sphere;
+}
+FSphere CreateSphere(const float4 Vector)
+{
+	FSphere Sphere;
+	Sphere.Origin = Vector.xyz;
+	Sphere.Radius = Vector.w;
+	return Sphere;
+}
+
+void IntersectSphere(const FRay Ray, inout FRayHit BestHit, const FSphere Sphere)
+{
+	// https://en.wikipedia.org/wiki/Line-sphere_intersection
+	const float3 Delta = Ray.Origin - Sphere.Origin;
+	const float B = -dot(Ray.Direction, Delta);
+	const float Discriminant = B*B - dot(Delta, Delta) + Sphere.Radius*Sphere.Radius;
+	if (Discriminant < 0)
+	{
+		return;
+	}
+	
+	const float SqrtD = sqrt(Discriminant);
+	// Pick positive solution closest to camera
+	const float t = B - SqrtD > 0 ? B - SqrtD : B + SqrtD;
+	if (t > 0 && t < BestHit.Distance)
+	{
+		BestHit.Distance = t;
+		BestHit.Position = Ray.Origin + t * Ray.Direction;
+		BestHit.Normal = normalize(BestHit.Position - Sphere.Origin);
+	}
+}
+
+FRayHit Trace(const FRay Ray)
+{
+	FRayHit BestHit = CreateInitialRayHit();
+
+	// Trace against ground
+	IntersectGroundPlane(Ray, BestHit);
+
+	// Trace against each sphere in the buffer
+	uint NumSpheres, Stride;
+	SphereBuffer.GetDimensions(NumSpheres, Stride);
+	for (uint i = 0; i < NumSpheres; i++)
+	{
+		IntersectSphere(Ray, BestHit, CreateSphere(SphereBuffer[i]));
+	}
+	//IntersectSphere(Ray, BestHit, CreateSphere(SphereBuffer[0].xyz, SphereBuffer[0].w));
+	//IntersectSphere(Ray, BestHit, CreateSphere(float3(0.f, 0.f, 50.f), 50.f));
+	
+	return BestHit;
+}
+
+float3 SampleSkybox(const FRay Ray)
+{
+	const float Theta = (atan2(Ray.Direction.x, Ray.Direction.y) / PI) + 0.5f;
+    const float Phi = acos(Ray.Direction.z) / PI;
+    return SkyboxTexture.SampleLevel(SkyboxTextureSampler, float2(Theta, Phi), 0).rgb;
+}
+
+float3 Shade(inout FRay Ray, const FRayHit Hit)
+{
+	if (Hit.Distance < INF)
+	{
+		// Hit something
+		const float3 Specular = 0.6f;
+
+		Ray.Origin = Hit.Position + Hit.Normal * 0.001f;
+		Ray.Direction = reflect(Ray.Direction, Hit.Normal);
+		Ray.Energy *= Specular;
+		
+		return 0.f;
+	} else
+	{
+		// Hit the sky
+		Ray.Energy = 0.f;
+        return SampleSkybox(Ray);
+	}
+}
+
+float3 TraceRay(FRay Ray)
+{
+	float3 Result = 0.f;
+	FRayHit Hit;
+	for (int i = 0; i < 8; i++)
+	{
+		Hit = Trace(Ray);
+		Result += Ray.Energy * Shade(Ray, Hit);
+
+		// Early out if ray runs out of energy
+		if (!any(Ray.Energy))
+		{
+			break;
+		}
+	}
+	return Result;
+}
+
+float2 ConvertUV(const float2 ThreadID, const float2 Offset)
+{
+	float2 UV = ((ThreadID.xy + Offset) / float2(Dimensions)) * 2.f - 1.f;
+	UV.y = -UV.y; // Flip in y direction (UE4 textures have the origin in the top left)
+	return UV;
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, 1)]
+void MainCS(const uint3 ThreadID : SV_DispatchThreadID)
+{
+	float3 Result = 0.f;
+	
+	uint AASamples, Stride;
+	RandomBuffer.GetDimensions(AASamples, Stride);
+	const float SampleWeight = 1.f / float(AASamples); // Equally weight samples
+	
+	for (uint Sample = 0; Sample < AASamples; Sample++)
+	{
+		// Transform pixel to [-1,1] range
+		const float2 UV = ConvertUV(ThreadID.xy, RandomBuffer[Sample]);
+
+		// Create a camera ray and trace
+		Result += TraceRay(CreateCameraRay(UV)) * SampleWeight;
+	}
+
+	for (uint Sample = 0; Sample < AASamples; Sample++)
+	{
+		RandomBuffer[Sample] = 0.5f;
+	}
+	
+	OutputTexture[ThreadID.xy] = float4(Result, 1.f);
+}

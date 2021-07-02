@@ -1,0 +1,28 @@
+﻿// Copyright Ben Sutherland 2021. All rights reserved.
+
+// ReSharper disable once CppUnusedIncludeDirective
+#include "/Engine/Public/Platform.ush"
+
+RWTexture2D<float> OutputTexture;
+int2 Dimensions;
+uint TimeStamp;
+
+float hash12(float2 p)
+{
+	float3 p3 = frac(float3(p.xyx) * .1031);
+	p3 += dot(p3, p3.yzx + 33.33);
+	return frac((p3.x + p3.y) * p3.z);
+}
+
+// Number of threads per group
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void MainCS(uint3 GroupId : SV_GroupID,				//atm: -, 0...256, - in rows (Y)        --> current group index (dispatched by c++)
+			uint3 DispatchId : SV_DispatchThreadID,	//atm: 0...256 in rows & columns (XY)   --> "global" thread id
+			uint3 GroupThreadId : SV_GroupThreadID,	//atm: 0...256, -,- in columns (X)      --> current threadId in group / "local" threadId
+			uint GroupIndex : SV_GroupIndex)		//atm: 0...256 in columns (X)           --> "flattened" index of a thread within a group)
+{   
+	float2 p = float2(DispatchId.xy * TimeStamp);
+	float output = hash12(p);
+    
+	OutputTexture[DispatchId.xy] = output;
+}
