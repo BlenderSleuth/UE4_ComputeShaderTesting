@@ -191,7 +191,7 @@ float3 TraceRay(FRay Ray)
 float2 ConvertUV(const float2 ThreadID, const float2 Offset)
 {
 	float2 UV = ((ThreadID.xy + Offset) / float2(Dimensions)) * 2.f - 1.f;
-	UV.y = -UV.y; // Flip in y direction (UE4 textures have the origin in the top left)
+	UV.y = 1.f - UV.y; // Flip in y direction (UE4 textures have the origin in the top left)
 	return UV;
 }
 
